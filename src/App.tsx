@@ -12,18 +12,31 @@ type FileNode = {
 type AppSettings = {
   theme: 'sakura' | 'ink';
   fontSize: number;
+  tabSize: number;
+  lineNumbers: boolean;
+  minimap: boolean;
   wordWrap: boolean;
   autosave: boolean;
   reducedMotion: boolean;
 };
 
-const STORAGE_KEY = 'sakura-code-lab.phase1';
+type SearchResult = {
+  path: string;
+  line: number;
+  column: number;
+  snippet: string;
+};
+
+const STORAGE_KEY = 'sakura-code-lab.phase2';
 const DB_NAME = 'sakura-code-lab';
 const STORE_NAME = 'projects';
 
 const defaultSettings: AppSettings = {
   theme: 'sakura',
   fontSize: 14,
+  tabSize: 2,
+  lineNumbers: true,
+  minimap: true,
   wordWrap: true,
   autosave: true,
   reducedMotion: false
@@ -58,6 +71,28 @@ console.log(greet('developer'));
             type: 'file',
             content: `export const formatProjectName = (name: string) =>
   name.trim().toLowerCase().replace(/\s+/g, '-');
+
+export const buildGreeting = (name: string) => {
+  return 'Hello ' + formatProjectName(name);
+};
+`
+          }
+        ]
+      },
+      {
+        id: 'tests',
+        name: 'tests',
+        type: 'folder',
+        children: [
+          {
+            id: 'tests-sample',
+            name: 'sample.test.ts',
+            type: 'file',
+            content: `describe('Sakura project smoke test', () => {
+  it('loads the base app', () => {
+    expect(true).toBe(true);
+  });
+});
 `
           }
         ]
@@ -66,25 +101,21 @@ console.log(greet('developer'));
         id: 'readme',
         name: 'README.md',
         type: 'file',
-        content: `# Sakura Code Lab\n\nPhase 1 foundation for the Sakura IDE.\n\n- workspace shell\n- file explorer\n- editor\n- persistence\n- Sakura-inspired theme\n`
+        content: '# Sakura Code Lab\n\nPhase 2 editor improvements.\n\n- searchable workspace\n- refactored tabs\n- better editor configuration\n- command palette\n'
       },
       {
         id: 'package',
         name: 'package.json',
         type: 'file',
-        content: JSON.stringify(
-          {
-            name: 'sakura-code-lab',
-            version: '0.1.0',
-            private: true,
-            scripts: {
-              dev: 'vite',
-              build: 'vite build'
-            }
-          },
-          null,
-          2
-        )
+        content: JSON.stringify({
+          name: 'sakura-code-lab',
+          version: '0.1.0',
+          private: true,
+          scripts: {
+            dev: 'vite',
+            build: 'vite build'
+          }
+        }, null, 2)
       }
     ]
   };
@@ -178,10 +209,7 @@ function duplicateNodeByPath(root: FileNode, path: string): FileNode {
 
   return updateNodeByPath(root, parentPath || root.name, (node) => {
     if (node.type !== 'folder') return node;
-    return {
-      ...node,
-      children: [...(node.children ?? []), duplicate]
-    };
+    return { ...node, children: [...(node.children ?? []), duplicate] };
   });
 }
 
@@ -195,6 +223,43 @@ function getLanguageFromPath(path: string): string {
   if (ext === 'html') return 'html';
   if (ext === 'py') return 'python';
   return 'plaintext';
+}
+
+function findSearchMatches(root: FileNode, query: string): SearchResult[] {
+  if (!query.trim()) return [];
+
+  const results: SearchResult[] = [];
+  const lowerQuery = query.toLowerCase();
+
+  function walk(node: FileNode, parentPath: string) {
+    if (node.type === 'file') {
+      const content = node.content ?? '';
+      const lines = content.split(/\r?\n/);
+      lines.forEach((line, index) => {
+        const normalized = line.toLowerCase();
+        const position = normalized.indexOf(lowerQuery);
+        if (position >= 0) {
+          const resultPath = parentPath ? `${parentPath}/${node.name}` : node.name;
+          results.push({
+            path: resultPath,
+            line: index + 1,
+            column: position + 1,
+            snippet: line.trim() || '(blank line)'
+          });
+        }
+      });
+    }
+
+    if (node.type === 'folder') {
+      for (const child of node.children ?? []) {
+        const nextPath = parentPath ? `${parentPath}/${child.name}` : child.name;
+        walk(child, nextPath);
+      }
+    }
+  }
+
+  walk(root, '');
+  return results.slice(0, 20);
 }
 
 function openIndexedDb(): Promise<IDBDatabase> {
@@ -222,7 +287,7 @@ async function saveProjectToStorage(project: FileNode): Promise<void> {
     const tx = db.transaction(STORE_NAME, 'readwrite');
     tx.objectStore(STORE_NAME).put(payload, 'active-project');
   } catch {
-    // localStorage remains the source of truth for this phase.
+    // localStorage remains the primary persistence mechanism.
   }
 }
 
@@ -248,7 +313,7 @@ async function loadProjectFromStorage(): Promise<FileNode> {
               return;
             }
           } catch {
-            // ignore bad payload
+            // ignore malformed payload and fall back.
           }
         }
         resolve(createDefaultProject());
@@ -267,10 +332,14 @@ function App() {
   const [activeTab, setActiveTab] = useState<string>('src/main.ts');
   const [settings, setSettings] = useState<AppSettings>(defaultSettings);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [saveState, setSaveState] = useState<'Saved' | 'Saving' | 'Unsaved'>('Saved');
+  const [searchTerm, setSearchTerm] = useState('formatProjectName');
+  const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
   const [expandedFolders, setExpandedFolders] = useState<Record<string, boolean>>({
     'sakura-project': true,
-    src: true
+    src: true,
+    tests: true
   });
 
   useEffect(() => {
@@ -283,6 +352,11 @@ function App() {
   }, []);
 
   useEffect(() => {
+    const results = findSearchMatches(project, searchTerm);
+    setSearchResults(results);
+  }, [searchTerm, project]);
+
+  useEffect(() => {
     if (!settings.autosave) return;
     setSaveState('Saving');
     const timeout = window.setTimeout(() => {
@@ -291,6 +365,23 @@ function App() {
 
     return () => window.clearTimeout(timeout);
   }, [project, settings.autosave]);
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      const isMeta = event.ctrlKey || event.metaKey;
+      if (isMeta && event.key.toLowerCase() === 'k') {
+        event.preventDefault();
+        setCommandPaletteOpen(true);
+      }
+      if (event.key === 'Escape') {
+        setCommandPaletteOpen(false);
+        setSettingsOpen(false);
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, []);
 
   const activeFile = useMemo(() => findNodeByPath(project, activeFilePath), [project, activeFilePath]);
   const activeContent = activeFile && activeFile.type === 'file' ? (activeFile.content ?? '') : '';
@@ -335,7 +426,6 @@ function App() {
     setProject((current) => {
       const nextParent = findNodeByPath(current, parentPath);
       if (!nextParent || nextParent.type !== 'folder') return current;
-
       return updateNodeByPath(current, parentPath, (node) => {
         if (node.type !== 'folder') return node;
         return { ...node, children: [...(node.children ?? []), newNode] };
@@ -370,7 +460,6 @@ function App() {
     setProject((current) => {
       const nextParent = findNodeByPath(current, parentPath);
       if (!nextParent || nextParent.type !== 'folder') return current;
-
       return updateNodeByPath(current, parentPath, (node) => {
         if (node.type !== 'folder') return node;
         return { ...node, children: [...(node.children ?? []), newNode] };
@@ -434,6 +523,16 @@ function App() {
     event.target.value = '';
   };
 
+  const commandPaletteItems = [
+    { label: 'Open File', action: () => openFile('src/main.ts') },
+    { label: 'Save All', action: saveNow },
+    { label: 'Create File', action: () => createFile() },
+    { label: 'Create Folder', action: () => createFolder() },
+    { label: 'Format Document', action: () => setSearchTerm('formatProjectName') },
+    { label: 'Toggle Search', action: () => setSearchTerm('greet') },
+    { label: 'Toggle Settings', action: () => setSettingsOpen(true) }
+  ];
+
   return (
     <div className={`app-shell ${settings.theme}`}>
       <header className="topbar">
@@ -452,6 +551,7 @@ function App() {
 
         <div className="topbar-actions">
           <span className={`save-status ${saveState === 'Saved' ? 'saved' : 'unsaved'}`}>{saveState}</span>
+          <button className="icon-btn" onClick={() => setCommandPaletteOpen(true)}>Command</button>
           <button className="icon-btn" onClick={() => setSettingsOpen(true)}>⚙</button>
         </div>
       </header>
@@ -523,6 +623,7 @@ function App() {
 
           <div className="editor-toolbar">
             <button onClick={saveNow}>Save</button>
+            <button onClick={() => setSearchTerm('greet')}>Find</button>
             <button onClick={() => openFile('src/main.ts')}>Open</button>
             <button onClick={exportProject}>Export</button>
             <label className="import-label">
@@ -540,19 +641,81 @@ function App() {
               onChange={(value) => updateFileContent(value ?? '')}
               options={{
                 automaticLayout: true,
-                minimap: { enabled: true },
+                minimap: { enabled: settings.minimap },
                 fontSize: settings.fontSize,
+                tabSize: settings.tabSize,
+                lineNumbers: settings.lineNumbers ? 'on' : 'off',
                 wordWrap: settings.wordWrap ? 'on' : 'off',
-                lineNumbers: 'on',
                 roundedSelection: true,
                 padding: { top: 14 },
                 scrollBeyondLastLine: false,
-                tabSize: 2
+                find: {
+                  addExtraSpaceOnTop: false,
+                  autoFindInSelection: 'never',
+                  seedSearchStringFromSelection: 'never'
+                }
               }}
             />
           </div>
         </main>
+
+        <aside className="search-panel">
+          <div className="search-header">Workspace Search</div>
+          <input
+            value={searchTerm}
+            onChange={(event) => setSearchTerm(event.target.value)}
+            placeholder="Search in project"
+            aria-label="Search in project"
+          />
+
+          <div className="search-results">
+            {searchResults.length === 0 && (
+              <div className="search-empty">No matching results.</div>
+            )}
+
+            {searchResults.map((result) => (
+              <button
+                key={`${result.path}-${result.line}-${result.column}`}
+                className="search-result"
+                onClick={() => {
+                  openFile(result.path);
+                }}
+              >
+                <strong>{result.path}</strong>
+                <span>
+                  Ln {result.line}, Col {result.column}
+                </span>
+                <small>{result.snippet}</small>
+              </button>
+            ))}
+          </div>
+        </aside>
       </div>
+
+      {commandPaletteOpen && (
+        <div className="modal-overlay" onClick={() => setCommandPaletteOpen(false)}>
+          <div className="command-palette" onClick={(event) => event.stopPropagation()}>
+            <div className="panel-header settings-header">
+              <span>Command Palette</span>
+              <button onClick={() => setCommandPaletteOpen(false)}>×</button>
+            </div>
+
+            <div className="command-items">
+              {commandPaletteItems.map((item) => (
+                <button
+                  key={item.label}
+                  onClick={() => {
+                    item.action();
+                    setCommandPaletteOpen(false);
+                  }}
+                >
+                  {item.label}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
 
       {settingsOpen && (
         <div className="modal-overlay" onClick={() => setSettingsOpen(false)}>
@@ -590,6 +753,35 @@ function App() {
             <div className="settings-section">
               <h4>Editor</h4>
               <label>
+                Tab size
+                <select
+                  value={settings.tabSize}
+                  onChange={(event) => setSettings((current) => ({ ...current, tabSize: Number(event.target.value) }))}
+                >
+                  <option value={2}>2</option>
+                  <option value={4}>4</option>
+                </select>
+              </label>
+
+              <label>
+                <input
+                  type="checkbox"
+                  checked={settings.lineNumbers}
+                  onChange={(event) => setSettings((current) => ({ ...current, lineNumbers: event.target.checked }))}
+                />
+                Line numbers
+              </label>
+
+              <label>
+                <input
+                  type="checkbox"
+                  checked={settings.minimap}
+                  onChange={(event) => setSettings((current) => ({ ...current, minimap: event.target.checked }))}
+                />
+                Minimap
+              </label>
+
+              <label>
                 <input
                   type="checkbox"
                   checked={settings.wordWrap}
@@ -597,7 +789,10 @@ function App() {
                 />
                 Word wrap
               </label>
+            </div>
 
+            <div className="settings-section">
+              <h4>Behavior</h4>
               <label>
                 <input
                   type="checkbox"
@@ -606,10 +801,7 @@ function App() {
                 />
                 Auto-save
               </label>
-            </div>
 
-            <div className="settings-section">
-              <h4>Accessibility</h4>
               <label>
                 <input
                   type="checkbox"
