@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ChangeEvent } from 'react';
+import { useEffect, useMemo, useState, type ChangeEvent, type Dispatch, type SetStateAction } from 'react';
 import Editor from '@monaco-editor/react';
 
 type FileNode = {
@@ -45,7 +45,13 @@ type TestResult = {
   details: string;
 };
 
-const STORAGE_KEY = 'sakura-code-lab.phase3';
+type AssistantMessage = {
+  id: string;
+  role: 'user' | 'assistant';
+  text: string;
+};
+
+const STORAGE_KEY = 'sakura-code-lab.phase4';
 const DB_NAME = 'sakura-code-lab';
 const STORE_NAME = 'projects';
 
@@ -119,7 +125,7 @@ export const buildGreeting = (name: string) => {
         id: 'readme',
         name: 'README.md',
         type: 'file',
-        content: '# Sakura Code Lab\n\nPhase 3 runtime and diagnostics.\n\n- execution outputs\n- problems panel\n- test reporting\n- project search\n'
+        content: '# Sakura Code Lab\n\nPhase 4 assistant workflow.\n\n- IDE runtime polish\n- AI guided actions\n- project health summary\n- richer project tasks\n'
       },
       {
         id: 'package',
@@ -243,6 +249,20 @@ function getLanguageFromPath(path: string): string {
   return 'plaintext';
 }
 
+function countFiles(root: FileNode): number {
+  let total = 0;
+
+  function walk(node: FileNode) {
+    if (node.type === 'file') total += 1;
+    if (node.type === 'folder') {
+      for (const child of node.children ?? []) walk(child);
+    }
+  }
+
+  walk(root);
+  return total;
+}
+
 function findSearchMatches(root: FileNode, query: string): SearchResult[] {
   if (!query.trim()) return [];
 
@@ -340,7 +360,7 @@ function getDiagnosticsForProject(project: FileNode): DiagnosticItem[] {
 
 function getTestResultsForProject(project: FileNode): TestResult[] {
   const fileCount = countFiles(project);
-  const sampleCount = Math.max(1, Math.min(4, Math.ceil(fileCount / 2))); 
+  const sampleCount = Math.max(1, Math.min(4, Math.ceil(fileCount / 2)));
 
   return Array.from({ length: sampleCount }, (_, index) => ({
     id: `test-${index + 1}`,
@@ -349,20 +369,6 @@ function getTestResultsForProject(project: FileNode): TestResult[] {
     duration: `${Math.max(8, 18 + index * 5)}ms`,
     details: index < 2 ? 'Project structure validated' : 'Awaiting execution'
   }));
-}
-
-function countFiles(root: FileNode): number {
-  let total = 0;
-
-  function walk(node: FileNode) {
-    if (node.type === 'file') total += 1;
-    if (node.type === 'folder') {
-      for (const child of node.children ?? []) walk(child);
-    }
-  }
-
-  walk(root);
-  return total;
 }
 
 function openIndexedDb(): Promise<IDBDatabase> {
@@ -444,6 +450,13 @@ function App() {
     'Sakura runtime initialized.',
     'Project sandbox is ready.',
     'Waiting for execution.'
+  ]);
+  const [assistantMessages, setAssistantMessages] = useState<AssistantMessage[]>([
+    {
+      id: 'intro',
+      role: 'assistant',
+      text: 'I can help with project health, refactors, test generation, and runtime guidance.'
+    }
   ]);
   const [expandedFolders, setExpandedFolders] = useState<Record<string, boolean>>({
     'sakura-project': true,
@@ -652,10 +665,7 @@ function App() {
 
     try {
       if (lang.includes('typescript') || lang.includes('javascript')) {
-        const runner = new Function(
-          'console',
-          `${code}; return 'Execution complete';`
-        );
+        const runner = new Function('console', `${code}; return 'Execution complete';`);
 
         const logs: string[] = [];
         const fakeConsole = {
@@ -690,6 +700,29 @@ function App() {
       `Completed ${results.filter((item) => item.status === 'pass').length} / ${results.length} checks.`
     ]);
     setBottomTab('tests');
+  };
+
+  const addAssistantMessage = (text: string, role: 'user' | 'assistant' = 'assistant') => {
+    setAssistantMessages((current) => [...current, { id: `${Date.now()}-${Math.random()}`, role, text }]);
+  };
+
+  const handleAiAction = (kind: 'summary' | 'tests' | 'fixes') => {
+    if (kind === 'summary') {
+      const fileSummary = activeFile && activeFile.type === 'file'
+        ? `This file is ${activeFile.name}. It contains ${activeFile.content?.split(/\s+/).length ?? 0} words and is currently active in the editor.`
+        : 'No file is currently selected.';
+
+      addAssistantMessage(fileSummary, 'assistant');
+      addAssistantMessage('I can also help refine this file into a production-ready implementation.', 'user');
+      return;
+    }
+
+    if (kind === 'tests') {
+      addAssistantMessage('I recommend adding a small smoke test around the exported public API and validating project startup behavior.', 'assistant');
+      return;
+    }
+
+    addAssistantMessage('Priority fixes: remove debug logging, verify startup flow, and ensure the project diagnostics stay clean before release.', 'assistant');
   };
 
   const commandPaletteItems = [
@@ -845,6 +878,38 @@ function App() {
                 <span>Ln {result.line}, Col {result.column}</span>
                 <small>{result.snippet}</small>
               </button>
+            ))}
+          </div>
+        </aside>
+
+        <aside className="ai-panel">
+          <div className="ai-header">AI Workspace</div>
+          <div className="ai-summary-grid">
+            <div className="summary-card">
+              <span>Files</span>
+              <strong>{countFiles(project)}</strong>
+            </div>
+            <div className="summary-card warning">
+              <span>Issues</span>
+              <strong>{diagnostics.length}</strong>
+            </div>
+            <div className="summary-card pass">
+              <span>Checks</span>
+              <strong>{testResults.filter((test) => test.status === 'pass').length}</strong>
+            </div>
+          </div>
+
+          <div className="ai-actions">
+            <button onClick={() => handleAiAction('summary')}>Summarize file</button>
+            <button onClick={() => handleAiAction('tests')}>Generate tests</button>
+            <button onClick={() => handleAiAction('fixes')}>Review fixes</button>
+          </div>
+
+          <div className="assistant-thread">
+            {assistantMessages.map((message) => (
+              <div key={message.id} className={`assistant-message ${message.role}`}>
+                {message.text}
+              </div>
             ))}
           </div>
         </aside>
@@ -1006,7 +1071,7 @@ type TreeNodeProps = {
   path: string;
   activeFilePath: string;
   expandedFolders: Record<string, boolean>;
-  setExpandedFolders: React.Dispatch<React.SetStateAction<Record<string, boolean>>>;
+  setExpandedFolders: Dispatch<SetStateAction<Record<string, boolean>>>;
   onOpen: (path: string) => void;
   onRename: (path: string) => void;
   onDuplicate: (path: string) => void;
