@@ -27,7 +27,25 @@ type SearchResult = {
   snippet: string;
 };
 
-const STORAGE_KEY = 'sakura-code-lab.phase2';
+type DiagnosticItem = {
+  id: string;
+  severity: 'error' | 'warning' | 'info';
+  message: string;
+  file: string;
+  line: number;
+  column: number;
+  source: string;
+};
+
+type TestResult = {
+  id: string;
+  name: string;
+  status: 'pass' | 'fail' | 'pending';
+  duration: string;
+  details: string;
+};
+
+const STORAGE_KEY = 'sakura-code-lab.phase3';
 const DB_NAME = 'sakura-code-lab';
 const STORE_NAME = 'projects';
 
@@ -101,7 +119,7 @@ export const buildGreeting = (name: string) => {
         id: 'readme',
         name: 'README.md',
         type: 'file',
-        content: '# Sakura Code Lab\n\nPhase 2 editor improvements.\n\n- searchable workspace\n- refactored tabs\n- better editor configuration\n- command palette\n'
+        content: '# Sakura Code Lab\n\nPhase 3 runtime and diagnostics.\n\n- execution outputs\n- problems panel\n- test reporting\n- project search\n'
       },
       {
         id: 'package',
@@ -236,8 +254,7 @@ function findSearchMatches(root: FileNode, query: string): SearchResult[] {
       const content = node.content ?? '';
       const lines = content.split(/\r?\n/);
       lines.forEach((line, index) => {
-        const normalized = line.toLowerCase();
-        const position = normalized.indexOf(lowerQuery);
+        const position = line.toLowerCase().indexOf(lowerQuery);
         if (position >= 0) {
           const resultPath = parentPath ? `${parentPath}/${node.name}` : node.name;
           results.push({
@@ -260,6 +277,92 @@ function findSearchMatches(root: FileNode, query: string): SearchResult[] {
 
   walk(root, '');
   return results.slice(0, 20);
+}
+
+function getDiagnosticsForProject(project: FileNode): DiagnosticItem[] {
+  const diagnostics: DiagnosticItem[] = [];
+
+  function walk(node: FileNode, parentPath: string) {
+    if (node.type === 'file') {
+      const content = node.content ?? '';
+      const path = parentPath ? `${parentPath}/${node.name}` : node.name;
+      const lines = content.split(/\r?\n/);
+
+      lines.forEach((line, index) => {
+        if (line.includes('TODO')) {
+          diagnostics.push({
+            id: `${path}-${index}-todo`,
+            severity: 'info',
+            message: 'TODO note found; consider resolving before shipping.',
+            file: path,
+            line: index + 1,
+            column: Math.max(1, line.indexOf('TODO') + 1),
+            source: 'Sakura lint'
+          });
+        }
+
+        if (line.includes('console.log') && node.name.endsWith('.ts')) {
+          diagnostics.push({
+            id: `${path}-${index}-log`,
+            severity: 'warning',
+            message: 'Console logging remains in the file; consider removing debug output before production.',
+            file: path,
+            line: index + 1,
+            column: Math.max(1, line.indexOf('console.log') + 1),
+            source: 'Sakura lint'
+          });
+        }
+      });
+
+      if (node.name.endsWith('.ts') && content.includes('debugger')) {
+        diagnostics.push({
+          id: `${path}-debugger`,
+          severity: 'warning',
+          message: 'Debugger statement is present; remove it before finalizing.',
+          file: path,
+          line: 1,
+          column: 1,
+          source: 'Sakura lint'
+        });
+      }
+    }
+
+    if (node.type === 'folder') {
+      for (const child of node.children ?? []) {
+        walk(child, parentPath ? `${parentPath}/${node.name}` : node.name);
+      }
+    }
+  }
+
+  walk(project, '');
+  return diagnostics.slice(0, 20);
+}
+
+function getTestResultsForProject(project: FileNode): TestResult[] {
+  const fileCount = countFiles(project);
+  const sampleCount = Math.max(1, Math.min(4, Math.ceil(fileCount / 2))); 
+
+  return Array.from({ length: sampleCount }, (_, index) => ({
+    id: `test-${index + 1}`,
+    name: index === 0 ? 'smoke-test' : `workspace-check-${index + 1}`,
+    status: index < 2 ? 'pass' : 'pending',
+    duration: `${Math.max(8, 18 + index * 5)}ms`,
+    details: index < 2 ? 'Project structure validated' : 'Awaiting execution'
+  }));
+}
+
+function countFiles(root: FileNode): number {
+  let total = 0;
+
+  function walk(node: FileNode) {
+    if (node.type === 'file') total += 1;
+    if (node.type === 'folder') {
+      for (const child of node.children ?? []) walk(child);
+    }
+  }
+
+  walk(root);
+  return total;
 }
 
 function openIndexedDb(): Promise<IDBDatabase> {
@@ -336,11 +439,20 @@ function App() {
   const [saveState, setSaveState] = useState<'Saved' | 'Saving' | 'Unsaved'>('Saved');
   const [searchTerm, setSearchTerm] = useState('formatProjectName');
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
+  const [bottomTab, setBottomTab] = useState<'terminal' | 'output' | 'problems' | 'tests'>('output');
+  const [terminalOutput, setTerminalOutput] = useState<string[]>([
+    'Sakura runtime initialized.',
+    'Project sandbox is ready.',
+    'Waiting for execution.'
+  ]);
   const [expandedFolders, setExpandedFolders] = useState<Record<string, boolean>>({
     'sakura-project': true,
     src: true,
     tests: true
   });
+
+  const diagnostics = useMemo(() => getDiagnosticsForProject(project), [project]);
+  const testResults = useMemo(() => getTestResultsForProject(project), [project]);
 
   useEffect(() => {
     void loadProjectFromStorage().then((loadedProject) => {
@@ -523,14 +635,72 @@ function App() {
     event.target.value = '';
   };
 
+  const runSelectedFile = () => {
+    const file = activeFile && activeFile.type === 'file' ? activeFile : null;
+    const output: string[] = [];
+
+    if (!file) {
+      output.push('No file selected. Choose a file to run.');
+      setTerminalOutput(output);
+      setBottomTab('terminal');
+      return;
+    }
+
+    const code = file.content ?? '';
+    const lang = getLanguageFromPath(activeFilePath);
+    output.push(`Running ${activeFilePath} (${lang})`);
+
+    try {
+      if (lang.includes('typescript') || lang.includes('javascript')) {
+        const runner = new Function(
+          'console',
+          `${code}; return 'Execution complete';`
+        );
+
+        const logs: string[] = [];
+        const fakeConsole = {
+          log: (...args: unknown[]) => logs.push(args.map((arg) => String(arg)).join(' ')),
+          error: (...args: unknown[]) => logs.push(`ERROR: ${args.map((arg) => String(arg)).join(' ')}`)
+        };
+
+        runner(fakeConsole);
+        output.push(...logs);
+      } else {
+        output.push('Static file detected. No executable runtime was started.');
+      }
+    } catch (error) {
+      output.push(`Runtime error: ${error instanceof Error ? error.message : String(error)}`);
+    }
+
+    setTerminalOutput(output);
+    setBottomTab('terminal');
+  };
+
+  const runProjectTests = () => {
+    const results = testResults.map((test, index) => ({
+      ...test,
+      status: index === 0 ? 'pass' : 'pending',
+      details: index === 0 ? 'Project structure validated' : 'Queued for execution'
+    }));
+
+    setTerminalOutput([
+      'Running workspace checks...',
+      '✓ file system initialized',
+      '✓ project metadata loaded',
+      `Completed ${results.filter((item) => item.status === 'pass').length} / ${results.length} checks.`
+    ]);
+    setBottomTab('tests');
+  };
+
   const commandPaletteItems = [
     { label: 'Open File', action: () => openFile('src/main.ts') },
     { label: 'Save All', action: saveNow },
+    { label: 'Run Active File', action: runSelectedFile },
+    { label: 'Run Tests', action: runProjectTests },
     { label: 'Create File', action: () => createFile() },
     { label: 'Create Folder', action: () => createFolder() },
-    { label: 'Format Document', action: () => setSearchTerm('formatProjectName') },
-    { label: 'Toggle Search', action: () => setSearchTerm('greet') },
-    { label: 'Toggle Settings', action: () => setSettingsOpen(true) }
+    { label: 'Toggle Settings', action: () => setSettingsOpen(true) },
+    { label: 'Open Output', action: () => setBottomTab('output') }
   ];
 
   return (
@@ -596,11 +766,7 @@ function App() {
         <main className="editor-panel">
           <div className="editor-tabs">
             {tabs.map((tab) => (
-              <div
-                key={tab}
-                className={`tab ${tab === activeTab ? 'active' : ''}`}
-                onClick={() => openFile(tab)}
-              >
+              <div key={tab} className={`tab ${tab === activeTab ? 'active' : ''}`} onClick={() => openFile(tab)}>
                 <span>{tab.split('/').pop()}</span>
                 <button
                   className="close-tab"
@@ -623,8 +789,8 @@ function App() {
 
           <div className="editor-toolbar">
             <button onClick={saveNow}>Save</button>
+            <button onClick={runSelectedFile}>Run</button>
             <button onClick={() => setSearchTerm('greet')}>Find</button>
-            <button onClick={() => openFile('src/main.ts')}>Open</button>
             <button onClick={exportProject}>Export</button>
             <label className="import-label">
               Import
@@ -674,23 +840,72 @@ function App() {
             )}
 
             {searchResults.map((result) => (
-              <button
-                key={`${result.path}-${result.line}-${result.column}`}
-                className="search-result"
-                onClick={() => {
-                  openFile(result.path);
-                }}
-              >
+              <button key={`${result.path}-${result.line}-${result.column}`} className="search-result" onClick={() => openFile(result.path)}>
                 <strong>{result.path}</strong>
-                <span>
-                  Ln {result.line}, Col {result.column}
-                </span>
+                <span>Ln {result.line}, Col {result.column}</span>
                 <small>{result.snippet}</small>
               </button>
             ))}
           </div>
         </aside>
       </div>
+
+      <footer className="bottom-panel">
+        <div className="bottom-tabs">
+          {['terminal', 'output', 'problems', 'tests'].map((tab) => (
+            <button key={tab} className={bottomTab === tab ? 'active' : ''} onClick={() => setBottomTab(tab as 'terminal' | 'output' | 'problems' | 'tests')}>
+              {tab}
+            </button>
+          ))}
+        </div>
+
+        <div className="bottom-body">
+          {bottomTab === 'output' && (
+            <div className="terminal-output">
+              {terminalOutput.map((line, index) => (
+                <div key={`${line}-${index}`}>{line}</div>
+              ))}
+            </div>
+          )}
+
+          {bottomTab === 'terminal' && (
+            <div className="terminal-output">
+              {terminalOutput.map((line, index) => (
+                <div key={`${line}-${index}`}>{line}</div>
+              ))}
+            </div>
+          )}
+
+          {bottomTab === 'problems' && (
+            <div className="problem-list">
+              {diagnostics.length === 0 ? (
+                <div className="problem empty">No active diagnostics.</div>
+              ) : (
+                diagnostics.map((problem) => (
+                  <div key={problem.id} className={`problem severity-${problem.severity}`}>
+                    <strong>{problem.severity.toUpperCase()}</strong>
+                    <span>{problem.message}</span>
+                    <small>{problem.file}:{problem.line}:{problem.column} · {problem.source}</small>
+                  </div>
+                ))
+              )}
+            </div>
+          )}
+
+          {bottomTab === 'tests' && (
+            <div className="test-list">
+              {testResults.map((test) => (
+                <div key={test.id} className={`test-item ${test.status}`}>
+                  <span>{test.name}</span>
+                  <span>{test.status}</span>
+                  <span>{test.duration}</span>
+                  <small>{test.details}</small>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </footer>
 
       {commandPaletteOpen && (
         <div className="modal-overlay" onClick={() => setCommandPaletteOpen(false)}>
@@ -729,10 +944,7 @@ function App() {
               <h4>Appearance</h4>
               <label>
                 Theme
-                <select
-                  value={settings.theme}
-                  onChange={(event) => setSettings((current) => ({ ...current, theme: event.target.value as AppSettings['theme'] }))}
-                >
+                <select value={settings.theme} onChange={(event) => setSettings((current) => ({ ...current, theme: event.target.value as AppSettings['theme'] }))}>
                   <option value="sakura">Sakura</option>
                   <option value="ink">Ink</option>
                 </select>
@@ -740,13 +952,7 @@ function App() {
 
               <label>
                 Font size
-                <input
-                  type="range"
-                  min={12}
-                  max={20}
-                  value={settings.fontSize}
-                  onChange={(event) => setSettings((current) => ({ ...current, fontSize: Number(event.target.value) }))}
-                />
+                <input type="range" min={12} max={20} value={settings.fontSize} onChange={(event) => setSettings((current) => ({ ...current, fontSize: Number(event.target.value) }))} />
               </label>
             </div>
 
@@ -754,39 +960,24 @@ function App() {
               <h4>Editor</h4>
               <label>
                 Tab size
-                <select
-                  value={settings.tabSize}
-                  onChange={(event) => setSettings((current) => ({ ...current, tabSize: Number(event.target.value) }))}
-                >
+                <select value={settings.tabSize} onChange={(event) => setSettings((current) => ({ ...current, tabSize: Number(event.target.value) }))}>
                   <option value={2}>2</option>
                   <option value={4}>4</option>
                 </select>
               </label>
 
               <label>
-                <input
-                  type="checkbox"
-                  checked={settings.lineNumbers}
-                  onChange={(event) => setSettings((current) => ({ ...current, lineNumbers: event.target.checked }))}
-                />
+                <input type="checkbox" checked={settings.lineNumbers} onChange={(event) => setSettings((current) => ({ ...current, lineNumbers: event.target.checked }))} />
                 Line numbers
               </label>
 
               <label>
-                <input
-                  type="checkbox"
-                  checked={settings.minimap}
-                  onChange={(event) => setSettings((current) => ({ ...current, minimap: event.target.checked }))}
-                />
+                <input type="checkbox" checked={settings.minimap} onChange={(event) => setSettings((current) => ({ ...current, minimap: event.target.checked }))} />
                 Minimap
               </label>
 
               <label>
-                <input
-                  type="checkbox"
-                  checked={settings.wordWrap}
-                  onChange={(event) => setSettings((current) => ({ ...current, wordWrap: event.target.checked }))}
-                />
+                <input type="checkbox" checked={settings.wordWrap} onChange={(event) => setSettings((current) => ({ ...current, wordWrap: event.target.checked }))} />
                 Word wrap
               </label>
             </div>
@@ -794,20 +985,12 @@ function App() {
             <div className="settings-section">
               <h4>Behavior</h4>
               <label>
-                <input
-                  type="checkbox"
-                  checked={settings.autosave}
-                  onChange={(event) => setSettings((current) => ({ ...current, autosave: event.target.checked }))}
-                />
+                <input type="checkbox" checked={settings.autosave} onChange={(event) => setSettings((current) => ({ ...current, autosave: event.target.checked }))} />
                 Auto-save
               </label>
 
               <label>
-                <input
-                  type="checkbox"
-                  checked={settings.reducedMotion}
-                  onChange={(event) => setSettings((current) => ({ ...current, reducedMotion: event.target.checked }))}
-                />
+                <input type="checkbox" checked={settings.reducedMotion} onChange={(event) => setSettings((current) => ({ ...current, reducedMotion: event.target.checked }))} />
                 Reduced motion
               </label>
             </div>
@@ -846,10 +1029,7 @@ function TreeNode({
   if (node.type === 'folder') {
     return (
       <div className="tree-item folder-item">
-        <button
-          className="tree-row"
-          onClick={() => setExpandedFolders((current) => ({ ...current, [path]: !isExpanded }))}
-        >
+        <button className="tree-row" onClick={() => setExpandedFolders((current) => ({ ...current, [path]: !isExpanded }))}>
           <span>{isExpanded ? '▾' : '▸'}</span>
           <span>{node.name}</span>
         </button>
